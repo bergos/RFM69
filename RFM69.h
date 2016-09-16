@@ -3,6 +3,7 @@
 // **********************************************************************************
 // Copyright Felix Rusu (2014), felix@lowpowerlab.com
 // http://lowpowerlab.com/
+// Raspberry Pi port by Alexandre Bouillot (2014-2015) @abouillot on twitter
 // **********************************************************************************
 // License
 // **********************************************************************************
@@ -30,7 +31,19 @@
 // **********************************************************************************
 #ifndef RFM69_h
 #define RFM69_h
-#include <Arduino.h>            // assumes Arduino IDE v1.0 or greater
+#ifdef RASPBERRY
+#include <stdint.h>
+
+#define RF69_MAX_DATA_LEN     61 // to take advantage of the built in AES/CRC we want to limit the frame size to the internal FIFO size (66 bytes - 3 bytes overhead - 2 bytes crc)
+
+#define RF69_SPI_CS           0 // SS is the SPI slave select pin, for instance D10 on atmega328
+#define RF69_IRQ_PIN          6
+#define RF69_IRQ_NUM          0
+ 
+#define SPI_SPEED 500000
+#define SPI_DEVICE 0
+#else
+#include <Arduino.h>            //assumes Arduino IDE v1.0 or greater
 
 #define RF69_MAX_DATA_LEN       61 // to take advantage of the built in AES/CRC we want to limit the frame size to the internal FIFO size (66 bytes - 3 bytes overhead - 2 bytes crc)
 #define RF69_SPI_CS             SS // SS is the SPI slave select pin, for instance D10 on ATmega328
@@ -52,7 +65,7 @@
   #define RF69_IRQ_PIN          2
   #define RF69_IRQ_NUM          0  
 #endif
-
+#endif
 
 #define CSMA_LIMIT              -90 // upper RX signal sensitivity threshold in dBm for carrier sense access
 #define RF69_MODE_SLEEP         0 // XTAL OFF

@@ -3,6 +3,7 @@
 // **********************************************************************************
 // Copyright Felix Rusu (2014), felix@lowpowerlab.com
 // http://lowpowerlab.com/
+// Raspberry Pi port by Alexandre Bouillot (2014-2015) @abouillot on twitter
 // **********************************************************************************
 // License
 // **********************************************************************************
@@ -30,7 +31,19 @@
 // **********************************************************************************
 #include <RFM69.h>
 #include <RFM69registers.h>
+#ifdef RASPBERRY
+#include <wiringPi.h>
+#include <wiringPiSPI.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+
+#include <unistd.h>	//usleep
+#define MICROSLEEP_LENGTH 15
+
+#else
 #include <SPI.h>
+#endif
 
 volatile uint8_t RFM69::DATA[RF69_MAX_DATA_LEN];
 volatile uint8_t RFM69::_mode;        // current transceiver state
@@ -88,9 +101,17 @@ bool RFM69::initialize(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
     {255, 0}
   };
 
+#ifdef RASPBERRY
+  // Initialize SPI device 0
+  if(wiringPiSPISetup(SPI_DEVICE, SPI_SPEED) < 0) {
+    fprintf(stderr, "Unable to open SPI device\n\r");
+    exit(1);
+  }
+#else
   digitalWrite(_slaveSelectPin, HIGH);
   pinMode(_slaveSelectPin, OUTPUT);
   SPI.begin();
+#endif
   unsigned long start = millis();
   uint8_t timeout = 50;
   do writeReg(REG_SYNCVALUE1, 0xAA); while (readReg(REG_SYNCVALUE1) != 0xaa && millis()-start < timeout);
@@ -111,8 +132,13 @@ bool RFM69::initialize(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
   if (millis()-start >= timeout)
     return false;
   _inISR = false;
+#ifdef RASPBERRY
+  // Attach the Interupt
+  wiringPiSetup();
+  wiringPiISR(_interruptNum, INT_EDGE_RISING, RFM69::isr0);
+#else
   attachInterrupt(_interruptNum, RFM69::isr0, RISING);
-
+#endif
   selfPointer = this;
   _address = nodeID;
   return true;
@@ -269,7 +295,12 @@ void RFM69::sendACK(const void* buffer, uint8_t bufferSize) {
   int16_t _RSSI = RSSI; // save payload received RSSI value
   writeReg(REG_PACKETCONFIG2, (readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART); // avoid RX deadlocks
   uint32_t now = millis();
-  while (!canSend() && millis() - now < RF69_CSMA_LIMIT_MS) receiveDone();
+  while (!canSend() && millis() - now < RF69_CSMA_LIMIT_MS) {
+#ifdef RASPBERRY
+    delayMicroseconds(MICROSLEEP_LENGTH);
+#endif
+    receiveDone();
+  }
   SENDERID = sender;    // TWS: Restore SenderID after it gets wiped out by receiveDone()
   sendFrame(sender, buffer, bufferSize, false, true);
   RSSI = _RSSI; // restore payload RSSI
@@ -290,6 +321,23 @@ void RFM69::sendFrame(uint8_t toAddress, const void* buffer, uint8_t bufferSize,
   else if (requestACK)
     CTLbyte = RFM69_CTL_REQACK;
 
+#ifdef RASPBERRY
+  unsigned char thedata[63];
+  uint8_t i;
+  for(i = 0; i < 63; i++) thedata[i] = 0;
+
+  thedata[0] = REG_FIFO | 0x80;
+  thedata[1] = bufferSize + 3;
+  thedata[2] = toAddress;
+  thedata[3] = _address;
+  thedata[4] = CTLbyte;
+
+  // write to FIFO
+  for(i = 0; i < bufferSize; i++) {
+    thedata[i + 5] = ((char*)buffer)[i];
+  }
+  wiringPiSPIDataRW(SPI_DEVICE, thedata, bufferSize + 5);
+#else
   // write to FIFO
   select();
   SPI.transfer(REG_FIFO | 0x80);
@@ -301,7 +349,7 @@ void RFM69::sendFrame(uint8_t toAddress, const void* buffer, uint8_t bufferSize,
   for (uint8_t i = 0; i < bufferSize; i++)
     SPI.transfer(((uint8_t*) buffer)[i]);
   unselect();
-
+#endif
   // no need to wait for transmit mode to be ready since its handled by the radio
   setMode(RF69_MODE_TX);
   uint32_t txStart = millis();
@@ -312,17 +360,37 @@ void RFM69::sendFrame(uint8_t toAddress, const void* buffer, uint8_t bufferSize,
 
 // internal function - interrupt gets called when a packet is received
 void RFM69::interruptHandler() {
-  //pinMode(4, OUTPUT);
+
+#ifdef RASPBERRY
+  unsigned char thedata[67];
+  char i;
+  for(i = 0; i < 67; i++) thedata[i] = 0;
+//  printf("interruptHandler %d\n", intCount);
+#endif
+ 
+ //pinMode(4, OUTPUT);
   //digitalWrite(4, 1);
   if (_mode == RF69_MODE_RX && (readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PAYLOADREADY))
   {
     //RSSI = readRSSI();
     setMode(RF69_MODE_STANDBY);
+#ifdef RASPBERRY
+    thedata[0] = REG_FIFO & 0x7F;
+    thedata[1] = 0; // PAYLOADLEN
+    thedata[2] = 0; //  TargetID
+    wiringPiSPIDataRW(SPI_DEVICE, thedata, 3);
+    delayMicroseconds(MICROSLEEP_LENGTH);
+
+    PAYLOADLEN = thedata[1];
+    PAYLOADLEN = PAYLOADLEN > 66 ? 66 : PAYLOADLEN; // precaution
+    TARGETID = thedata[2];
+#else
     select();
     SPI.transfer(REG_FIFO & 0x7F);
     PAYLOADLEN = SPI.transfer(0);
     PAYLOADLEN = PAYLOADLEN > 66 ? 66 : PAYLOADLEN; // precaution
     TARGETID = SPI.transfer(0);
+#endif
     if(!(_promiscuousMode || TARGETID == _address || TARGETID == RF69_BROADCAST_ADDR) // match this node's address, or broadcast address or anything in promiscuous mode
        || PAYLOADLEN < 3) // address situation could receive packets that are malformed and don't fit this libraries extra fields
     {
@@ -332,7 +400,27 @@ void RFM69::interruptHandler() {
       //digitalWrite(4, 0);
       return;
     }
+#ifdef RASPBERRY
+    DATALEN = PAYLOADLEN - 3;
+    thedata[0] = REG_FIFO & 0x77;
+    thedata[1] = 0; //SENDERID
+    thedata[2] = 0; //CTLbyte;
+    for(i = 0; i< DATALEN; i++) {
+      thedata[i+3] = 0;
+    }
 
+    wiringPiSPIDataRW(SPI_DEVICE, thedata, DATALEN + 3);
+
+    SENDERID = thedata[1];
+    uint8_t CTLbyte = thedata[2];
+
+    ACK_RECEIVED = CTLbyte & 0x80; //extract ACK-requested flag
+    ACK_REQUESTED = CTLbyte & 0x40; //extract ACK-received flag
+    for (i= 0; i < DATALEN; i++)
+      {
+      DATA[i] = thedata[i+3];
+      }
+#else
     DATALEN = PAYLOADLEN - 3;
     SENDERID = SPI.transfer(0);
     uint8_t CTLbyte = SPI.transfer(0);
@@ -346,6 +434,7 @@ void RFM69::interruptHandler() {
     {
       DATA[i] = SPI.transfer(0);
     }
+#endif
     if (DATALEN < RF69_MAX_DATA_LEN) DATA[DATALEN] = 0; // add null at end of string
     unselect();
     setMode(RF69_MODE_RX);
@@ -376,7 +465,9 @@ void RFM69::receiveBegin() {
 bool RFM69::receiveDone() {
 //ATOMIC_BLOCK(ATOMIC_FORCEON)
 //{
+#ifndef RASPBERRY
   noInterrupts(); // re-enabled in unselect() via setMode() or via receiveBegin()
+#endif
   if (_mode == RF69_MODE_RX && PAYLOADLEN > 0)
   {
     setMode(RF69_MODE_STANDBY); // enables interrupts
@@ -384,7 +475,9 @@ bool RFM69::receiveDone() {
   }
   else if (_mode == RF69_MODE_RX) // already in RX no payload yet
   {
+#ifndef RASPBERRY
     interrupts(); // explicitly re-enable interrupts
+#endif
     return false;
   }
   receiveBegin();
@@ -396,6 +489,23 @@ bool RFM69::receiveDone() {
 // To disable encryption: radio.encrypt(null) or radio.encrypt(0)
 // KEY HAS TO BE 16 bytes !!!
 void RFM69::encrypt(const char* key) {
+#ifdef RASPBERRY
+  unsigned char thedata[17];
+  char i;
+
+  setMode(RF69_MODE_STANDBY);
+  if (key!=0) {
+    thedata[0] = REG_AESKEY1 | 0x80;
+    for(i = 1; i < 17; i++) {
+      thedata[i] = key[i-1];
+    }
+
+    wiringPiSPIDataRW(SPI_DEVICE, thedata, 17);
+    delayMicroseconds(MICROSLEEP_LENGTH);
+  }
+
+  writeReg(REG_PACKETCONFIG2, (readReg(REG_PACKETCONFIG2) & 0xFE) | (key ? 1 : 0));
+#else
   setMode(RF69_MODE_STANDBY);
   if (key != 0)
   {
@@ -406,6 +516,7 @@ void RFM69::encrypt(const char* key) {
     unselect();
   }
   writeReg(REG_PACKETCONFIG2, (readReg(REG_PACKETCONFIG2) & 0xFE) | (key ? 1 : 0));
+#endif
 }
 
 // get the received signal strength indicator (RSSI)
@@ -424,11 +535,22 @@ int16_t RFM69::readRSSI(bool forceTrigger) {
 
 uint8_t RFM69::readReg(uint8_t addr)
 {
+#ifdef RASPBERRY
+  unsigned char thedata[2];
+  thedata[0] = addr & 0x7F;
+  thedata[1] = 0;
+
+  wiringPiSPIDataRW(SPI_DEVICE, thedata, 2);
+  delayMicroseconds(MICROSLEEP_LENGTH);
+
+  return thedata[1];
+#else
   select();
   SPI.transfer(addr & 0x7F);
   uint8_t regval = SPI.transfer(0);
   unselect();
   return regval;
+#endif  
 }
 
 void RFM69::writeReg(uint8_t addr, uint8_t value)
@@ -512,6 +634,15 @@ void SerialPrint_P(PGM_P str, void (*f)(uint8_t) = SerialWrite ) {
 
 void RFM69::readAllRegs()
 {
+#ifdef RASPBERRY
+  char thedata[2];
+  int i;
+  thedata[1] = 0;
+
+  for(i = 1; i <= 0x4F; i++) {
+   printf("%i - %i\n\r", i, readReg(i));
+  }  
+#else
   uint8_t regVal;
 
 #if REGISTER_DETAIL 
@@ -775,6 +906,7 @@ void RFM69::readAllRegs()
 #endif
   }
   unselect();
+#endif
 }
 
 uint8_t RFM69::readTemperature(uint8_t calFactor) // returns centigrade
