@@ -135,7 +135,7 @@ bool RFM69::initialize(uint8_t freqBand, uint8_t nodeID, uint8_t networkID)
 #ifdef RASPBERRY
   // Attach the Interupt
   wiringPiSetup();
-  wiringPiISR(_interruptNum, INT_EDGE_RISING, RFM69::isr0);
+  wiringPiISR(_interruptPin, INT_EDGE_RISING, RFM69::isr0);
 #else
   attachInterrupt(_interruptNum, RFM69::isr0, RISING);
 #endif
@@ -555,14 +555,24 @@ uint8_t RFM69::readReg(uint8_t addr)
 
 void RFM69::writeReg(uint8_t addr, uint8_t value)
 {
+#if RASPBERRY
+  unsigned char thedata[2];
+  thedata[0] = addr | 0x80;
+  thedata[1] = value;
+
+  wiringPiSPIDataRW(SPI_DEVICE, thedata, 2);
+  delayMicroseconds(MICROSLEEP_LENGTH);
+#else
   select();
   SPI.transfer(addr | 0x80);
   SPI.transfer(value);
   unselect();
+#endif
 }
 
 // select the RFM69 transceiver (save SPI settings, set CS low)
 void RFM69::select() {
+#ifndef RASPBERRY
   noInterrupts();
 #if defined (SPCR) && defined (SPSR)
   // save current SPI settings
@@ -574,6 +584,7 @@ void RFM69::select() {
   SPI.setBitOrder(MSBFIRST);
   SPI.setClockDivider(SPI_CLOCK_DIV4); // decided to slow down from DIV2 after SPI stalling in some instances, especially visible on mega1284p when RFM69 and FLASH chip both present
   digitalWrite(_slaveSelectPin, LOW);
+#endif
 }
 
 // unselect the RFM69 transceiver (set CS high, restore SPI settings)
@@ -925,6 +936,8 @@ void RFM69::rcCalibration()
 
 inline void RFM69::maybeInterrupts()
 {
+#ifndef RASPBERRY
   // Only reenable interrupts if we're not being called from the ISR
   if (!_inISR) interrupts();
+#endif
 }
